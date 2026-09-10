@@ -1,11 +1,22 @@
 const express = require("express");
+const { createRoutes, createWebhookRoutes } = require("./routes/billing.routes");
+const { BillingService } = require("./services/billing.service");
 
-const app = express();
+function createApp(billingService) {
+  const app = express();
 
-app.use(express.json());
+  const billing = billingService || new BillingService();
 
-app.get("/health", (req, res) => {
-  res.json({ status: "ok" });
-});
+  app.use(express.json());
 
-module.exports = app;
+  app.get("/health", (req, res) => {
+    res.json({ status: "ok" });
+  });
+
+  app.use("/billing", createRoutes(billing));
+  app.use("/webhooks", createWebhookRoutes(billing));
+
+  return app;
+}
+
+module.exports = createApp;

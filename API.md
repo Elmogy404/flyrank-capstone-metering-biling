@@ -1,5 +1,122 @@
 # API Contract
 
+## POST /billing/checkout
+
+Initiates a Pro subscription checkout with Paymob.
+
+### Headers
+
+- `Authorization: Bearer <tenant_id>`
+- `Content-Type: application/json`
+
+### Request Body
+
+```json
+{
+  "plan": "Pro"
+}
+```
+
+### Success Response (200)
+
+```json
+{
+  "checkoutUrl": "https://accept.paymob.com/unifiedcheckout/?publicKey=...&clientSecret=...",
+  "intentionId": "intention_123"
+}
+```
+
+### Errors
+
+#### 400 Bad Request
+
+Missing or invalid request body.
+
+```json
+{
+  "error": "plan is required"
+}
+```
+
+#### 401 Unauthorized
+
+Missing or invalid authentication token.
+
+```json
+{
+  "error": "Access token required"
+}
+```
+
+#### 404 Not Found
+
+Plan not found or no subscription for tenant.
+
+```json
+{
+  "error": "Plan not found"
+}
+```
+
+#### 409 Conflict
+
+Tenant already subscribed to the requested plan.
+
+```json
+{
+  "error": "Already subscribed to Pro"
+}
+```
+
+---
+
+## POST /webhooks/paymob
+
+Paymob webhook callback for payment verification. This endpoint is public (no authentication required).
+
+### Headers
+
+- `Content-Type: application/json`
+
+### Query Parameters
+
+- `hmac` - HMAC signature for verification
+
+### Request Body
+
+Paymob transaction callback payload containing:
+- `type` - Event type (e.g., "TRANSACTION")
+- `obj` - Transaction object with payment details
+
+### Success Response (200)
+
+```json
+{
+  "received": true
+}
+```
+
+### Errors
+
+#### 400 Bad Request
+
+Invalid HMAC signature or malformed payload.
+
+```json
+{
+  "error": "Invalid signature"
+}
+```
+
+### Security Notes
+
+- HMAC is verified using SHA-512 before any processing
+- Invalid signatures are rejected with 400 and no database changes occur
+- Duplicate events are handled idempotently (return 200 without reprocessing)
+- Webhook processing is transaction-safe
+
+---
+
 ## POST /generate
 
 Billable endpoint that simulates an AI generation request.
@@ -81,25 +198,3 @@ Returns the tenant's current monthly usage.
 #### 401 Unauthorized
 
 Authentication is required or invalid.
-
----
-
-## POST /webhooks/stripe
-
-Receives Stripe webhook events and synchronizes subscription state.
-
-### Headers
-
-- `Stripe-Signature: <signature>`
-
-### Supported Events
-
-- `checkout.session.completed`
-- `customer.subscription.updated`
-- `customer.subscription.deleted`
-
-### Errors
-
-#### 400 Bad Request
-
-Invalid Stripe signature or malformed webhook.
