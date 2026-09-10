@@ -1,8 +1,40 @@
 # API Contract
 
+## Base URL
+
+```
+http://localhost:3000
+```
+
+## Authentication
+
+All authenticated endpoints use the following header:
+
+```
+Authorization: Bearer <tenant_id>
+```
+
+Where `<tenant_id>` is the numeric ID of the tenant. This is a simplified capstone authentication mechanism — not production-grade.
+
+---
+
+## GET /health
+
+Health check endpoint. No authentication required.
+
+### Response (200)
+
+```json
+{
+  "status": "ok"
+}
+```
+
+---
+
 ## POST /billing/checkout
 
-Initiates a Pro subscription checkout with Paymob.
+Initiates a Paymob checkout for the Pro plan. Requires authentication.
 
 ### Headers
 
@@ -17,12 +49,14 @@ Initiates a Pro subscription checkout with Paymob.
 }
 ```
 
+Only `"Pro"` is currently accepted. The amount (50,000 EGP cents = 500 EGP) is determined server-side and cannot be controlled by the client.
+
 ### Success Response (200)
 
 ```json
 {
   "checkoutUrl": "https://accept.paymob.com/unifiedcheckout/?publicKey=...&clientSecret=...",
-  "intentionId": "intention_123"
+  "intentionId": "intention_..."
 }
 ```
 
@@ -48,9 +82,17 @@ Missing or invalid authentication token.
 }
 ```
 
+Or if the token is not a valid integer:
+
+```json
+{
+  "error": "Invalid token"
+}
+```
+
 #### 404 Not Found
 
-Plan not found or no subscription for tenant.
+Plan not found or no subscription exists for the tenant.
 
 ```json
 {
@@ -58,9 +100,17 @@ Plan not found or no subscription for tenant.
 }
 ```
 
+Or:
+
+```json
+{
+  "error": "No subscription found"
+}
+```
+
 #### 409 Conflict
 
-Tenant already subscribed to the requested plan.
+Tenant is already subscribed to the requested plan.
 
 ```json
 {
@@ -68,11 +118,19 @@ Tenant already subscribed to the requested plan.
 }
 ```
 
+#### 500 Internal Server Error
+
+```json
+{
+  "error": "Internal server error"
+}
+```
+
 ---
 
 ## POST /webhooks/paymob
 
-Paymob webhook callback for payment verification. This endpoint is public (no authentication required).
+Paymob webhook callback for payment verification. **This endpoint is public** — no authentication is required because Paymob must reach it directly.
 
 ### Headers
 
@@ -80,13 +138,41 @@ Paymob webhook callback for payment verification. This endpoint is public (no au
 
 ### Query Parameters
 
-- `hmac` - HMAC signature for verification
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `hmac` | Yes | HMAC-SHA512 signature for verification |
 
 ### Request Body
 
-Paymob transaction callback payload containing:
-- `type` - Event type (e.g., "TRANSACTION")
-- `obj` - Transaction object with payment details
+Paymob transaction callback payload:
+
+```json
+{
+  "type": "TRANSACTION",
+  "obj": {
+    "id": 123456789,
+    "pending": false,
+    "amount_cents": 50000,
+    "success": true,
+    "currency": "EGP",
+    "integration_id": 5911458,
+    "order": {
+      "id": 987654321,
+      "merchant_order_id": "tenant_1_plan_Pro_1694347200000",
+      "amount_cents": 50000,
+      "currency": "EGP"
+    },
+    "source_data": {
+      "pan": "2346",
+      "type": "card",
+      "sub_type": "MasterCard"
+    },
+    ...
+  }
+}
+```
+
+The `merchant_order_id` format is `tenant_{id}_{plan}_{timestamp}` and is used to identify the tenant.
 
 ### Success Response (200)
 
@@ -95,6 +181,11 @@ Paymob transaction callback payload containing:
   "received": true
 }
 ```
+
+This response is returned for all of the following cases:
+- Webhook processed successfully (subscription updated)
+- Duplicate event (already processed, safely ignored)
+- Cannot determine tenant from merchant_order_id
 
 ### Errors
 
@@ -108,93 +199,68 @@ Invalid HMAC signature or malformed payload.
 }
 ```
 
-### Security Notes
+Or:
 
-- HMAC is verified using SHA-512 before any processing
-- Invalid signatures are rejected with 400 and no database changes occur
-- Duplicate events are handled idempotently (return 200 without reprocessing)
-- Webhook processing is transaction-safe
+```json
+{
+  "error": "Invalid payload"
+}
+```
+
+#### 500 Internal Server Error
+
+```json
+{
+  "error": "Internal server error"
+}
+```
+
+### Security Behavior
+
+- **HMAC verification:** Payload is verified using SHA-512 with 20 fields from the `obj` object, concatenated in lexicographic key order
+- **Timing-safe comparison:** Uses `crypto.timingSafeEqual` to prevent timing attacks
+- **No database changes on invalid signature:** If HMAC verification fails, the handler returns 400 and no rows are inserted or updated
+- **Idempotent:** Duplicate provider events are detected via `UNIQUE(provider, provider_event_id)` constraint and safely ignored (return 200)
+- **Transaction-safe:** Subscription updates occur within a PostgreSQL transaction (BEGIN/COMMIT/ROLLBACK)
+- **Secrets not exposed:** Paymob credentials are never returned in response bodies or error messages
 
 ---
 
-## POST /generate
+## Service Layer Endpoints (Unit-Tested, No HTTP Routes)
 
-Billable endpoint that simulates an AI generation request.
+The following services exist and are tested via unit tests but are **not exposed as HTTP endpoints**:
 
-### Headers
+### MeterService.recordUsage()
 
-- `Authorization: Bearer <token>`
-- `Idempotency-Key: <unique-key>`
+Records a billable usage event. Tested in `tests/metering/meter.service.test.js`.
 
-### Request Body
-
-```json
-{
-  "prompt": "Explain REST APIs"
-}
+```javascript
+meterService.recordUsage({
+  tenantId: 1,
+  type: "API_CALL",    // or "AI_TOKEN"
+  quantity: 1,
+  idempotencyKey: "unique-key-per-tenant"
+})
+// Returns: { recorded: true/false, event: {...} }
 ```
 
-### Success Response
+### MeterService.getMonthlyUsage()
 
-```json
-{
-  "message": "Generation completed",
-  "result": "Dummy generated response",
-  "usage": {
-    "api_calls": 1,
-    "ai_tokens": 150
-  }
-}
+Returns monthly usage aggregation. Tested in `tests/metering/meter.service.test.js`.
+
+```javascript
+meterService.getMonthlyUsage(tenantId, period)
+// Returns: { API_CALL: { used: N }, AI_TOKEN: { used: N } }
 ```
 
-### Errors
+### QuotaService.checkQuota()
 
-#### 400 Bad Request
+Checks if usage is within plan limits. Tested indirectly through MeterService tests.
 
-Invalid request body or missing required fields.
-
-#### 401 Unauthorized
-
-Authentication is required or invalid.
-
-#### 402 Payment Required
-
-The tenant must upgrade or activate a valid subscription.
-
-#### 429 Too Many Requests
-
-The tenant has exceeded the usage quota.
-
----
-
-## GET /usage
-
-Returns the tenant's current monthly usage.
-
-### Headers
-
-- `Authorization: Bearer <token>`
-
-### Success Response
-
-```json
-{
-  "period": "2026-09",
-  "usage": {
-    "api_calls": {
-      "used": 25,
-      "limit": 1000
-    },
-    "ai_tokens": {
-      "used": 3500,
-      "limit": 100000
-    }
-  }
-}
+```javascript
+quotaService.checkQuota(tenantId, "API_CALL", quantity)
+// Returns: { allowed: true, currentUsage, limit, projected }
+// Throws: QuotaExceededError if exceeded
 ```
 
-### Errors
-
-#### 401 Unauthorized
-
-Authentication is required or invalid.
+These services are included in the codebase and tested but not wired to HTTP routes. See README.md limitations section.
