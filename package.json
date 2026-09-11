@@ -6,7 +6,8 @@
   "scripts": {
     "migrate": "node -r dotenv/config ./node_modules/node-pg-migrate/bin/node-pg-migrate up",
     "migrate:down": "node -r dotenv/config ./node_modules/node-pg-migrate/bin/node-pg-migrate down",
-    "test": "jest --forceExit --detectOpenHandles --runInBand"
+    "test": "jest --forceExit --detectOpenHandles --runInBand",
+    "reconcile": "node src/jobs/run-reconciliation.js"
   },
   "keywords": [],
   "author": "",

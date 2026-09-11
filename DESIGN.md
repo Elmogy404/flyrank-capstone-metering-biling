@@ -1,301 +1,123 @@
-# Usage Metering & Billing Engine — Design
+# Design
 
-## 1. Problem
+## Problem
 
-The system is a backend service responsible for:
-- Tracking tenant usage.
-- Enforcing monthly usage quotas based on subscription plans.
-- Calculating usage costs.
-- Synchronizing subscription state with Stripe.
-- Preventing duplicate usage records when requests are retried.
+Backend service for multi-tenant usage metering and billing:
+- Track tenant usage (API calls, AI tokens)
+- Enforce monthly quotas per plan
+- Calculate usage costs with markup
+- Process payments via Paymob
+- Prevent duplicate records on retries
 
-The core scope contains two plans (Free / Pro) and two usage types (API calls / AI tokens). AI usage is simulated; no real AI model integration is required.
+AI usage is simulated. No real model integration required.
 
-## 2. Scope
+## Scope
 
-### Core features
-1. Multi-tenant usage tracking.
-2. Monthly API-call and AI-token quotas.
-3. Idempotent usage recording.
-4. Quota enforcement.
-5. Monthly usage and cost rollups.
-6. AI token cost calculation.
-7. Stripe Test Mode Checkout.
-8. Stripe webhook verification and deduplication.
-9. Subscription/plan synchronization.
+**In:** Multi-tenant metering, monthly quotas, idempotent recording, quota enforcement, monthly rollups, AI token cost calculation, Paymob checkout, webhook verification, subscription sync.
 
-### Non-goals
-- Real AI model integration.
-- Real payments.
-- Invoicing.
-- Proration.
-- Overage billing.
+**Out:** Real payments, invoicing, proration, overage billing, real AI calls.
 
-## 3. Data Model
+## Data Model
 
-Core tables:
-- `tenants`
-- `plans`
-- `subscriptions`
-- `usage_events`
-
-Relationships:
-
-```text
+```
 Tenant 1 ────< Subscription >──── 1 Plan
 Tenant 1 ────< UsageEvent
+PaymentEvent (standalone, keyed by provider + event ID)
 ```
 
-### `tenants`
-```text
-id
-name
-email
-hashed_password
-status
-created_at
-updated_at
+- `usage_events` is the source of truth for usage
+- Usage is rolled up from events for the current billing month
+- Counters are not stored in `subscriptions`
+
+## Architecture
+
+```
+Client → HTTP API → Services → Repositories → PostgreSQL
+Paymob → Webhook → HMAC verify → Dedup → Subscription sync
 ```
 
-### `plans`
-```text
-id
-name
-api_calls_limit
-ai_tokens_limit
-created_at
+Services: MeterService, GeneratorService, UsageService, BillingService, PaymobService, SubscriptionService, ReconciliationJob.
+
+## Metering Strategy
+
+Every billable request provides an `Idempotency-Key`. Flow:
+
+1. Query for existing event (outside transaction)
+2. If found, return existing (idempotent)
+3. BEGIN transaction
+4. `SELECT ... FOR UPDATE` on subscription
+5. Read current usage
+6. Check: `currentUsage + quantity <= limit`
+7. INSERT usage event
+8. COMMIT
+
+The `UNIQUE(tenant_id, idempotency_key)` constraint is the final protection. Concurrent duplicates that pass the query check are caught by the constraint (code 23505) and resolved to the existing event.
+
+GeneratorService uses the same pattern but records both API_CALL and AI_TOKEN in a single transaction with derived idempotency keys (`generate_{key}` and `generate_tokens_{key}`).
+
+## Quota Strategy
+
+```
+currentUsage + requestedUsage > limit  →  reject (HTTP 429)
+currentUsage + requestedUsage <= limit →  allow
 ```
 
-### `subscriptions`
-```text
-id
-tenant_id
-plan_id
-status
-stripe_subscription_id
-started_at
-ended_at
-created_at
-updated_at
-```
+`SELECT ... FOR UPDATE` locks the subscription row within the transaction, preventing concurrent requests from exceeding the limit.
 
-### `usage_events`
-```text
-id
-tenant_id
-type
-quantity
-idempotency_key
-created_at
-```
+Exact boundary (usage + quantity = limit) is allowed. One unit over is rejected.
 
-Top-level usage types:
-```text
-API_CALL
-AI_TOKEN
-```
+## Pricing Model
 
-`quantity` is an integer. `idempotency_key` is required and scoped to the tenant.
+All values in integer microcents (1/100,000 of a cent):
 
-## 4. Usage Model
+| Category | Cost |
+|----------|------|
+| input | 100 |
+| cached_input | 10 |
+| output | 300 |
+| reasoning | 300 |
 
-`usage_events` is the source of truth for usage.
+Markup: NUMERATOR=3, DENOMINATOR=2 (1.5x). Applied via `Math.ceil()`.
 
-Usage is rolled up from events for the current billing month:
+Client price = raw cost × markup. No floating point anywhere.
 
-```text
-usage_events
-     │
-     │ monthly aggregation
-     ▼
-used / limit / cost
-```
+## Payment Provider: Paymob
 
-API/token counters are not stored as the primary usage state in `subscriptions`.
+The original capstone specified Stripe Test Mode. This implementation uses Paymob Test Mode due to regional availability (Egypt).
 
-## 5. Architecture
+**What changed:** Payment provider, webhook signature (Stripe Ed25519 → HMAC-SHA512), checkout flow (Stripe Sessions → Paymob Unified Checkout), webhook body format, tenant resolution (Stripe metadata → Paymob merchant_order_id), column name (`stripe_subscription_id` → `provider_subscription_id`).
 
-```text
-                    ┌──────────────┐
-                    │    Client    │
-                    └──────┬───────┘
-                           │
-                           ▼
-                  ┌─────────────────┐
-                  │   HTTP / API    │
-                  │ Routes          │
-                  │ Controllers     │
-                  └────────┬────────┘
-                           │
-                           ▼
-                  ┌─────────────────┐
-                  │    Services     │
-                  │                 │
-                  │ MeterService    │
-                  │ QuotaService    │
-                  │ BillingService  │
-                  │ StripeService   │
-                  └────────┬────────┘
-                           │
-                           ▼
-                  ┌─────────────────┐
-                  │  Data / DB      │
-                  │ Repositories    │
-                  └────────┬────────┘
-                           │
-                           ▼
-                  ┌─────────────────┐
-                  │   PostgreSQL    │
-                  └─────────────────┘
-```
+**What was preserved:** Server-side checkout, server-side pricing, signed provider callbacks, event deduplication, subscription synchronization, provider state as payment truth, transaction-safe state changes.
 
-Stripe payment synchronization:
+Paymob has no native subscription API. Checkout is a one-time payment for plan activation.
 
-```text
-                 Stripe
-                   │
-             signed webhook
-                   │
-                   ▼
-          /webhooks/stripe
-                   │
-                   ▼
-          StripeService
-                   │
-                   ▼
-             PostgreSQL
-```
+## Webhook Security
 
-## 6. API Surface
+1. HMAC-SHA512 verification (20 fields, lexicographic order)
+2. Timing-safe comparison (`crypto.timingSafeEqual`)
+3. Event deduplication (`UNIQUE(provider, provider_event_id)`)
+4. No state change before verification
+5. Subscription updates within a database transaction
 
-```text
-POST /generate
-GET  /usage
-POST /webhooks/stripe
-```
+## Reconciliation Job
 
-### `POST /generate`
+Runs outside the HTTP request path via `npm run reconcile`.
 
-Dummy billable endpoint.
+**Responsibility:** Detect unprocessed payment events and stale pending subscriptions.
 
-High-level flow:
+**Behavior:** Read-only diagnostic checks with retry on transient DB failures. Structured logging for failure reporting. Does not modify billing state.
 
-```text
-Validate request
-      ↓
-Identify tenant
-      ↓
-Check idempotency
-      ↓
-Check quota
-      ↓
-Record usage
-      ↓
-Calculate relevant cost
-      ↓
-Return result
-```
+**Execution:** CLI entry point suitable for cron, Task Scheduler, or Docker. Exit 0 = clean, 1 = errors.
 
-AI token usage is simulated.
+## Architecture Invariants
 
-### `GET /usage`
-
-Returns the tenant's current monthly:
-- used
-- limit
-- cost
-
-for supported usage types.
-
-### `POST /webhooks/stripe`
-
-Required events:
-```text
-checkout.session.completed
-customer.subscription.updated
-customer.subscription.deleted
-```
-
-Flow:
-```text
-Stripe
-  ↓
-Verify signature
-  ↓
-Check event deduplication
-  ↓
-Process event
-  ↓
-Update subscription / plan
-```
-
-## 7. Idempotency Strategy
-
-Every billable request must provide an `Idempotency-Key`.
-
-Database uniqueness will enforce:
-
-```text
-UNIQUE(tenant_id, idempotency_key)
-```
-
-The application will recognize duplicate requests and return the original result without recording usage again.
-
-The database constraint is the final protection against concurrent duplicate requests.
-
-## 8. Quota Strategy
-
-```text
-current usage + requested usage
-              │
-              ▼
-        compare with limit
-              │
-        ┌─────┴─────┐
-        │           │
-      allowed     exceeded
-        │           │
-        ▼           ▼
-    record       reject
-    usage        429 / 402
-```
-
-The concurrency-safe implementation will be designed during Phase 2.
-
-## 9. Cost Model
-
-Normal API usage:
-```text
-API calls → configured price
-```
-
-AI pricing categories:
-```text
-input tokens
-cached input tokens
-output tokens
-reasoning tokens
-```
-
-These are pricing categories, not top-level usage types.
-
-Top-level usage types remain:
-```text
-API_CALL
-AI_TOKEN
-```
-
-Money will use integer monetary units rather than floating-point values.
-
-## 10. Architecture Invariants
-
-1. Every usage event belongs to exactly one tenant.
-2. Tenants cannot access another tenant's usage.
-3. Usage events are the source of truth for usage.
-4. The same billable operation must not be counted twice.
-5. Database constraints protect against duplicate idempotency keys.
-6. Quota checks must be concurrency-safe.
-7. Money uses integer units.
-8. Stripe webhook signatures must be verified.
-9. Stripe events must be processed idempotently.
-10. Stripe is the payment source of truth; PostgreSQL mirrors verified subscription events.
+1. Every usage event belongs to exactly one tenant
+2. Tenants cannot access another tenant's usage
+3. Usage events are the source of truth
+4. Same billable operation must not be counted twice
+5. Database constraints protect against duplicate idempotency keys
+6. Quota checks must be concurrency-safe
+7. Money uses integer units
+8. Paymob webhook signatures must be verified
+9. Paymob events must be processed idempotently
+10. Paymob is the payment source of truth; PostgreSQL mirrors verified events
