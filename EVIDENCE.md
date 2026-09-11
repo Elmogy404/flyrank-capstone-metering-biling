@@ -579,10 +579,11 @@ test("concurrent duplicate webhooks do not double-process", async () => {
 npm run migrate
 ```
 
-Three migrations applied:
+Four migrations applied:
 1. `001_initial_schema.sql` — Creates plans, tenants, subscriptions, usage_events tables
 2. `002_seed.sql` — Seeds 3 plans (Free, Pro, Premium) and 1 demo tenant with active subscription
 3. `003_add_payment_events_and_provider.js` — Adds payment_events table, renames stripe_subscription_id to provider_subscription_id, adds provider column
+4. `004_add_usage_metadata.js` — Adds metadata JSONB column to usage_events for AI token category details
 
 ### payment_events unique constraint
 
@@ -634,26 +635,26 @@ CONSTRAINT unique_tenant_idempotency
 $ npm test
 
 Test Suites: 7 passed, 7 total
-Tests:       93 passed, 93 total
+Tests:       112 passed, 112 total
 ```
 
 **Test breakdown:**
 
 | Suite | Tests |
 |-------|-------|
-| `tests/metering/meter.service.test.js` | 9 |
+| `tests/metering/meter.service.test.js` | 14 |
 | `tests/billing/paymob.service.test.js` | 6 |
 | `tests/billing/billing.service.test.js` | 12 |
-| `tests/billing/integration.test.js` | 28 |
+| `tests/billing/integration.test.js` | 35 |
 | `tests/pricing.test.js` | 15 |
-| `tests/generator/generator.service.test.js` | 12 |
-| `tests/usage/usage.service.test.js` | 11 |
-| **Total** | **93** |
+| `tests/generator/generator.service.test.js` | 16 |
+| `tests/usage/usage.service.test.js` | 14 |
+| **Total** | **112** |
 
 **Test categories covered:**
 - Usage idempotency (2 tests)
-- Quota boundaries — within, exact, exceeded (3 tests)
-- Concurrency — duplicate requests, quota competition (3 tests)
+- Quota boundaries — within, exact, one-over, cumulative, rejected-no-persist (5 tests)
+- Concurrency — duplicate requests, quota competition, concurrent limit (4 tests)
 - HMAC verification — valid, invalid, null, empty, tampered (5 tests)
 - Checkout URL generation (1 test)
 - Checkout creation — known plan, unknown plan (2 tests)
@@ -661,10 +662,10 @@ Tests:       93 passed, 93 total
 - Tenant isolation (4 tests)
 - Concurrency — duplicate webhooks (2 tests)
 - Security — forged callbacks, secrets not exposed (3 tests)
-- HTTP integration — checkout, webhook, generate, usage endpoints (28 tests)
+- HTTP integration — checkout, webhook, generate, usage endpoints (35 tests)
 - Pricing — token categories, markup, cost calculation, error handling (15 tests)
-- Generator — atomic metering, idempotency, metadata, quota, isolation (12 tests)
-- Usage — aggregation, cost breakdown, plan limits, error handling (11 tests)
+- Generator — atomic metering, idempotency, metadata, quota, isolation, boundaries (16 tests)
+- Usage — aggregation, cost breakdown, plan limits, error handling, query validation (14 tests)
 
 ---
 

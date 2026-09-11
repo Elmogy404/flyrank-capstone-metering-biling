@@ -40,7 +40,7 @@ This system provides:
 - GET /usage endpoint with monthly usage + cost breakdown
 - AI token pricing by category (input, cached_input, output, reasoning)
 - Server-side cost calculation with configurable markup
-- 93 automated tests across 7 test suites
+- 112 automated tests across 7 test suites
 
 ## Architecture
 
@@ -275,7 +275,7 @@ Authorization: Bearer <tenant_id>
   },
   "cost": {
     "micro_units": 2650000,
-    "markup": 1.5,
+    "markup": { "numerator": 3, "denominator": 2 },
     "token_pricing": {
       "input": { "cost": 100, "price": 150 },
       "cached_input": { "cost": 10, "price": 15 },
@@ -397,7 +397,7 @@ Server runs on `http://localhost:3000` by default.
 npm test
 ```
 
-Expected result: **93 tests passed across 7 test suites.**
+Expected result: **112 tests passed across 7 test suites.**
 
 ## Testing
 
@@ -405,13 +405,13 @@ Tests are organized into 7 suites:
 
 | Suite | File | Tests | Coverage |
 |-------|------|-------|----------|
-| Metering | `tests/metering/meter.service.test.js` | 9 | Usage recording, idempotency, quota enforcement, concurrency, tenant isolation |
+| Metering | `tests/metering/meter.service.test.js` | 14 | Usage recording, idempotency, quota enforcement, concurrency, tenant isolation |
 | Paymob | `tests/billing/paymob.service.test.js` | 6 | HMAC verification, checkout URL generation |
 | Billing | `tests/billing/billing.service.test.js` | 12 | Checkout creation, webhook processing, deduplication, subscription sync, tenant isolation, concurrency, security |
-| Integration | `tests/billing/integration.test.js` | 28 | HTTP endpoint tests for all endpoints: checkout, webhook, generate, usage |
+| Integration | `tests/billing/integration.test.js` | 35 | HTTP endpoint tests for all endpoints: checkout, webhook, generate, usage |
 | Pricing | `tests/pricing.test.js` | 15 | Token pricing constants, cost calculation, markup, error handling |
-| Generator | `tests/generator/generator.service.test.js` | 12 | Atomic metering, idempotency, metadata, quota enforcement, tenant isolation |
-| Usage | `tests/usage/usage.service.test.js` | 11 | Monthly usage aggregation, cost breakdown, plan limits, error handling |
+| Generator | `tests/generator/generator.service.test.js` | 16 | Atomic metering, idempotency, metadata, quota enforcement, tenant isolation, boundary tests |
+| Usage | `tests/usage/usage.service.test.js` | 14 | Monthly usage aggregation, cost breakdown, plan limits, error handling, query param validation |
 
 ### Test Categories
 

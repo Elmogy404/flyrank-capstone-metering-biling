@@ -177,7 +177,7 @@ Monthly usage summary with cost breakdown. Requires authentication.
   },
   "cost": {
     "micro_units": 2650000,
-    "markup": 1.5,
+    "markup": { "numerator": 3, "denominator": 2 },
     "token_pricing": {
       "input": { "cost": 100, "price": 150 },
       "cached_input": { "cost": 10, "price": 15 },
