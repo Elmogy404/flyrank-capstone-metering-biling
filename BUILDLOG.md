@@ -74,6 +74,37 @@
 
 ---
 
+## Phase 4 — Generate & Usage Endpoints + Cost Calculation
+
+**What was built:**
+- `src/services/pricing.js` — AI token pricing constants (input, cached_input, output, reasoning) with integer microcent costs, configurable markup, and cost/price calculation functions
+- `src/services/generator.service.js` — Atomic billable operation: records API_CALL + AI_TOKEN in single transaction with simulated token generation
+- `src/services/usage.service.js` — Monthly usage aggregation with cost breakdown, plan limits, remaining quota
+- `src/controllers/generator.controller.js` — POST /billing/generate HTTP handler
+- `src/controllers/usage.controller.js` — GET /billing/usage HTTP handler
+- Migration 004 — `metadata` JSONB column on `usage_events` for AI token category details
+- Updated `usage.repository.js` — metadata support, detailed aggregation queries
+- Updated `billing.routes.js` — new routes with DI pattern
+- Updated `app.js` — mounts new routes with GeneratorService and UsageService
+- 50 new tests across 4 files (pricing, generator, usage, integration)
+- Updated all documentation (README, API.md, EVIDENCE.md, BUILDLOG.md, capstone.yaml)
+
+**AI assistance:**
+- Pricing design: integer microcent arithmetic to avoid floating point
+- Atomic metering strategy: API_CALL + AI_TOKEN in single transaction with shared idempotency key derivation
+- Token simulation: prompt-length-based estimation with input/cached/output/reasoning breakdown
+- Cost aggregation: JSONB metadata breakdown rolled up in application layer
+- Migration design: reversible JSONB column addition for usage event metadata
+
+**Human decisions:**
+- Token pricing tiers (input=100, cached_input=10, output=300, reasoning=300 microcents)
+- 1.5x markup factor
+- Atomic generation as single idempotent operation (not separate API_CALL + AI_TOKEN calls)
+- Simulated token generation (not real AI model calls)
+- JSONB metadata for flexible token breakdown storage
+
+---
+
 ## AI Mistakes / Corrections
 
 ### Mistake 1: Module-level singleton prevented mocking
@@ -163,3 +194,12 @@ This is documented as a known limitation.
 | `tests/billing/paymob.service.test.js` | 3 | Paymob service tests |
 | `tests/billing/billing.service.test.js` | 3 | Billing service tests |
 | `tests/billing/integration.test.js` | 3 | HTTP integration tests |
+| `migrations/004_add_usage_metadata.js` | 4 | Usage event metadata column |
+| `src/services/pricing.js` | 4 | Token pricing constants and cost calculation |
+| `src/services/generator.service.js` | 4 | Atomic generation with metering |
+| `src/services/usage.service.js` | 4 | Monthly usage aggregation with cost |
+| `src/controllers/generator.controller.js` | 4 | POST /billing/generate handler |
+| `src/controllers/usage.controller.js` | 4 | GET /billing/usage handler |
+| `tests/pricing.test.js` | 4 | Pricing unit tests |
+| `tests/generator/generator.service.test.js` | 4 | Generator service tests |
+| `tests/usage/usage.service.test.js` | 4 | Usage service tests |

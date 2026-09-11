@@ -6,7 +6,7 @@
   "scripts": {
     "migrate": "node -r dotenv/config ./node_modules/node-pg-migrate/bin/node-pg-migrate up",
     "migrate:down": "node -r dotenv/config ./node_modules/node-pg-migrate/bin/node-pg-migrate down",
-    "test": "jest --forceExit --detectOpenHandles"
+    "test": "jest --forceExit --detectOpenHandles --runInBand"
   },
   "keywords": [],
   "author": "",

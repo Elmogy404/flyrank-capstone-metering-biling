@@ -62,69 +62,145 @@ Only `"Pro"` is currently accepted. The amount (50,000 EGP cents = 500 EGP) is d
 
 ### Errors
 
-#### 400 Bad Request
+| Status | Error | Description |
+|--------|-------|-------------|
+| 400 | `plan is required` | Missing plan in request body |
+| 401 | `Access token required` | Missing Authorization header |
+| 401 | `Invalid token` | Non-integer tenant ID |
+| 404 | `Plan not found` | Unknown plan name |
+| 404 | `No subscription found` | Tenant has no subscription |
+| 409 | `Already subscribed to Pro` | Duplicate subscription |
+| 500 | `Internal server error` | Unexpected error |
 
-Missing or invalid request body.
+---
 
-```json
-{
-  "error": "plan is required"
-}
-```
+## POST /billing/generate
 
-#### 401 Unauthorized
+Atomic billable operation: records API_CALL + AI_TOKEN usage with simulated token generation. Requires authentication.
 
-Missing or invalid authentication token.
+### Headers
 
-```json
-{
-  "error": "Access token required"
-}
-```
+- `Authorization: Bearer <tenant_id>`
+- `Content-Type: application/json`
 
-Or if the token is not a valid integer:
-
-```json
-{
-  "error": "Invalid token"
-}
-```
-
-#### 404 Not Found
-
-Plan not found or no subscription exists for the tenant.
+### Request Body
 
 ```json
 {
-  "error": "Plan not found"
+  "prompt": "Explain quantum computing in simple terms",
+  "model": "gpt-4",
+  "idempotency_key": "unique-key-per-request"
 }
 ```
 
-Or:
+| Field | Required | Description |
+|-------|----------|-------------|
+| `prompt` | Yes | The input prompt for generation |
+| `model` | No | Model identifier (default: `gpt-4`) |
+| `idempotency_key` | Yes | Unique key per request for deduplication |
+
+**Behavior:**
+- Simulates AI token generation (input, cached_input, output, reasoning categories)
+- Atomically records both API_CALL and AI_TOKEN usage in a single transaction
+- Enforces monthly quota limits for both API calls and AI tokens
+- Duplicate idempotency keys return the original result without re-recording
+
+### Success Response (200)
 
 ```json
 {
-  "error": "No subscription found"
+  "recorded": true,
+  "usage": {
+    "input": 25,
+    "cached_input": 7,
+    "output": 37,
+    "reasoning": 15
+  },
+  "total_tokens": 84
 }
 ```
 
-#### 409 Conflict
+### Errors
 
-Tenant is already subscribed to the requested plan.
+| Status | Error | Description |
+|--------|-------|-------------|
+| 400 | `prompt is required` | Missing prompt in request body |
+| 400 | `idempotency_key is required` | Missing idempotency key |
+| 401 | `Access token required` | Missing Authorization header |
+| 401 | `Invalid token` | Non-integer tenant ID |
+| 404 | `No active subscription` | Tenant has no active subscription |
+| 429 | `Quota exceeded` | Rate limit exceeded (includes type, used, limit) |
+| 500 | `Internal server error` | Unexpected error |
+
+---
+
+## GET /billing/usage
+
+Monthly usage summary with cost breakdown. Requires authentication.
+
+### Headers
+
+- `Authorization: Bearer <tenant_id>`
+
+### Query Parameters
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `month` | No | Month number (1-12), defaults to current month |
+| `year` | No | Year (e.g. 2026), defaults to current year |
+
+### Success Response (200)
 
 ```json
 {
-  "error": "Already subscribed to Pro"
+  "period": {
+    "month": 9,
+    "year": 2026
+  },
+  "usage": {
+    "api_calls": {
+      "used": 42,
+      "limit": 10000,
+      "remaining": 9958
+    },
+    "ai_tokens": {
+      "used": 15000,
+      "limit": 1000000,
+      "remaining": 985000,
+      "breakdown": {
+        "input": 5000,
+        "cached_input": 1500,
+        "output": 6000,
+        "reasoning": 2500
+      }
+    }
+  },
+  "cost": {
+    "micro_units": 2650000,
+    "markup": 1.5,
+    "token_pricing": {
+      "input": { "cost": 100, "price": 150 },
+      "cached_input": { "cost": 10, "price": 15 },
+      "output": { "cost": 300, "price": 450 },
+      "reasoning": { "cost": 300, "price": 450 }
+    }
+  }
 }
 ```
 
-#### 500 Internal Server Error
+**Cost fields:**
+- `micro_units` — Total cost in integer microcents (1/100,000 of a cent), client price with markup applied
+- `markup` — Markup multiplier applied to raw cost
+- `token_pricing` — Per-category pricing reference (cost = raw, price = with markup)
 
-```json
-{
-  "error": "Internal server error"
-}
-```
+### Errors
+
+| Status | Error | Description |
+|--------|-------|-------------|
+| 401 | `Access token required` | Missing Authorization header |
+| 401 | `Invalid token` | Non-integer tenant ID |
+| 404 | `No active subscription` | Tenant has no active subscription |
+| 500 | `Internal server error` | Unexpected error |
 
 ---
 
@@ -166,8 +242,7 @@ Paymob transaction callback payload:
       "pan": "2346",
       "type": "card",
       "sub_type": "MasterCard"
-    },
-    ...
+    }
   }
 }
 ```
@@ -189,31 +264,11 @@ This response is returned for all of the following cases:
 
 ### Errors
 
-#### 400 Bad Request
-
-Invalid HMAC signature or malformed payload.
-
-```json
-{
-  "error": "Invalid signature"
-}
-```
-
-Or:
-
-```json
-{
-  "error": "Invalid payload"
-}
-```
-
-#### 500 Internal Server Error
-
-```json
-{
-  "error": "Internal server error"
-}
-```
+| Status | Error | Description |
+|--------|-------|-------------|
+| 400 | `Invalid signature` | HMAC verification failed |
+| 400 | `Invalid payload` | Missing `obj` in request body |
+| 500 | `Internal server error` | Unexpected error |
 
 ### Security Behavior
 
@@ -223,44 +278,3 @@ Or:
 - **Idempotent:** Duplicate provider events are detected via `UNIQUE(provider, provider_event_id)` constraint and safely ignored (return 200)
 - **Transaction-safe:** Subscription updates occur within a PostgreSQL transaction (BEGIN/COMMIT/ROLLBACK)
 - **Secrets not exposed:** Paymob credentials are never returned in response bodies or error messages
-
----
-
-## Service Layer Endpoints (Unit-Tested, No HTTP Routes)
-
-The following services exist and are tested via unit tests but are **not exposed as HTTP endpoints**:
-
-### MeterService.recordUsage()
-
-Records a billable usage event. Tested in `tests/metering/meter.service.test.js`.
-
-```javascript
-meterService.recordUsage({
-  tenantId: 1,
-  type: "API_CALL",    // or "AI_TOKEN"
-  quantity: 1,
-  idempotencyKey: "unique-key-per-tenant"
-})
-// Returns: { recorded: true/false, event: {...} }
-```
-
-### MeterService.getMonthlyUsage()
-
-Returns monthly usage aggregation. Tested in `tests/metering/meter.service.test.js`.
-
-```javascript
-meterService.getMonthlyUsage(tenantId, period)
-// Returns: { API_CALL: { used: N }, AI_TOKEN: { used: N } }
-```
-
-### QuotaService.checkQuota()
-
-Checks if usage is within plan limits. Tested indirectly through MeterService tests.
-
-```javascript
-quotaService.checkQuota(tenantId, "API_CALL", quantity)
-// Returns: { allowed: true, currentUsage, limit, projected }
-// Throws: QuotaExceededError if exceeded
-```
-
-These services are included in the codebase and tested but not wired to HTTP routes. See README.md limitations section.

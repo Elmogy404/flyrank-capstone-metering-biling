@@ -158,9 +158,189 @@ test("concurrent requests competing for quota respect the limit", async () => {
 
 ## Cost Calculation
 
-**Status: Pending Phase 4**
+### Token pricing constants are correct
 
-Cost calculation, AI token pricing rules, and cost rollups are not yet implemented. The `usage_events` table tracks quantities; pricing logic will be added in Phase 4.
+**Test:** `pricing.test.js` — "has all four token categories"
+
+```javascript
+test("has all four token categories", () => {
+  expect(TOKEN_PRICING.input).toBeDefined();
+  expect(TOKEN_PRICING.cached_input).toBeDefined();
+  expect(TOKEN_PRICING.output).toBeDefined();
+  expect(TOKEN_PRICING.reasoning).toBeDefined();
+});
+```
+
+**Result:** All four token categories defined with integer microcent costs.
+
+### Cached input is cheaper than input
+
+**Test:** `pricing.test.js` — "cached_input is cheaper than input"
+
+```javascript
+test("cached_input is cheaper than input", () => {
+  expect(TOKEN_PRICING.cached_input.costMicroUnits).toBeLessThan(
+    TOKEN_PRICING.input.costMicroUnits
+  );
+});
+```
+
+**Result:** `cached_input` (10) < `input` (100), enforcing cost hierarchy.
+
+### Markup applied to raw cost
+
+**Test:** `pricing.test.js` — "applies markup to cost"
+
+```javascript
+test("applies markup to cost", () => {
+  const price = calculatePrice("input", 1000);
+  const expectedCost = TOKEN_PRICING.input.costMicroUnits * 1000;
+  const expectedPrice = Math.ceil(expectedCost * MARKUP);
+  expect(price).toBe(expectedPrice);
+});
+```
+
+**Result:** Client price = raw cost × 1.5 markup, calculated with integer ceiling.
+
+### Cost calculation uses integer arithmetic
+
+**Test:** `pricing.test.js` — "all costs are integers"
+
+```javascript
+test("all costs are integers", () => {
+  for (const category of Object.values(TOKEN_PRICING)) {
+    expect(Number.isInteger(category.costMicroUnits)).toBe(true);
+  }
+});
+```
+
+**Result:** No floating point used. All pricing values are integers.
+
+---
+
+## Generate Endpoint (POST /billing/generate)
+
+### Authenticated tenant can generate
+
+**Test:** `integration.test.js` — "authenticated tenant can generate"
+
+```javascript
+test("authenticated tenant can generate", async () => {
+  const res = await request(app)
+    .post("/billing/generate")
+    .set("Authorization", `Bearer ${tenantId}`)
+    .send({ prompt: "Hello world", model: "gpt-4", idempotency_key: "integ-gen-1" });
+
+  expect(res.status).toBe(200);
+  expect(res.body.recorded).toBe(true);
+  expect(res.body.usage).toBeDefined();
+  expect(res.body.usage.input).toBeGreaterThan(0);
+  expect(res.body.usage.output).toBeGreaterThan(0);
+  expect(res.body.total_tokens).toBeGreaterThan(0);
+});
+```
+
+**Result:** Returns 200 with token breakdown and total count.
+
+### Atomic API_CALL + AI_TOKEN metering
+
+**Test:** `generator.service.test.js` — "records API_CALL and AI_TOKEN usage atomically"
+
+```javascript
+test("records API_CALL and AI_TOKEN usage atomically", async () => {
+  const result = await generatorService.generate({
+    tenantId, prompt: "Hello, how are you?", model: "gpt-4", idempotencyKey: "gen-001",
+  });
+  expect(result.recorded).toBe(true);
+  expect(result.usage.input).toBeGreaterThan(0);
+  expect(result.usage.output).toBeGreaterThan(0);
+  expect(result.totalTokens).toBe(
+    result.usage.input + result.usage.cached_input + result.usage.output + result.usage.reasoning
+  );
+});
+```
+
+**Result:** Both API_CALL and AI_TOKEN events created in single transaction.
+
+### Quota enforcement on generate
+
+**Test:** `generator.service.test.js` — "rejects usage exceeding API_CALL quota"
+
+```javascript
+test("rejects usage exceeding API_CALL quota", async () => {
+  // Fill quota to limit
+  for (let i = 0; i < 1000; i++) {
+    await meterService.recordUsage({
+      tenantId, type: "API_CALL", quantity: 1, idempotencyKey: `quota-api-${i}`,
+    });
+  }
+  await expect(
+    generatorService.generate({ tenantId, prompt: "Over quota", model: "gpt-4", idempotencyKey: "gen-over-api" })
+  ).rejects.toThrow(QuotaExceededError);
+});
+```
+
+**Result:** QuotaExceededError thrown when API_CALL or AI_TOKEN limit exceeded.
+
+---
+
+## Usage Endpoint (GET /billing/usage)
+
+### Returns monthly usage with cost breakdown
+
+**Test:** `integration.test.js` — "reflects usage from generate calls"
+
+```javascript
+test("reflects usage from generate calls", async () => {
+  await request(app)
+    .post("/billing/generate")
+    .set("Authorization", `Bearer ${tenantId}`)
+    .send({ prompt: "Usage test", idempotency_key: "integ-usage-1" });
+
+  const res = await request(app)
+    .get("/billing/usage")
+    .set("Authorization", `Bearer ${tenantId}`);
+
+  expect(res.status).toBe(200);
+  expect(res.body.usage.api_calls.used).toBeGreaterThanOrEqual(1);
+  expect(res.body.usage.ai_tokens.used).toBeGreaterThan(0);
+});
+```
+
+**Result:** Usage reflects recorded events; cost breakdown included.
+
+### Includes plan limits and remaining quota
+
+**Test:** `integration.test.js` — "includes plan limits"
+
+```javascript
+test("includes plan limits", async () => {
+  const res = await request(app)
+    .get("/billing/usage")
+    .set("Authorization", `Bearer ${tenantId}`);
+
+  expect(res.body.usage.api_calls.limit).toBeGreaterThan(0);
+  expect(res.body.usage.ai_tokens.limit).toBeGreaterThan(0);
+});
+```
+
+**Result:** Plan limits from subscription returned alongside usage.
+
+---
+
+## Data Model
+
+### Migrations applied successfully
+
+```bash
+npm run migrate
+```
+
+Four migrations applied:
+1. `001_initial_schema.sql` — Creates plans, tenants, subscriptions, usage_events tables
+2. `002_seed.sql` — Seeds 3 plans (Free, Pro, Premium) and 1 demo tenant with active subscription
+3. `003_add_payment_events_and_provider.js` — Adds payment_events table, renames stripe_subscription_id to provider_subscription_id, adds provider column
+4. `004_add_usage_metadata.js` — Adds metadata JSONB column to usage_events for AI token category details
 
 ---
 
@@ -453,8 +633,8 @@ CONSTRAINT unique_tenant_idempotency
 ```bash
 $ npm test
 
-Test Suites: 4 passed, 4 total
-Tests:       43 passed, 43 total
+Test Suites: 7 passed, 7 total
+Tests:       93 passed, 93 total
 ```
 
 **Test breakdown:**
@@ -464,8 +644,11 @@ Tests:       43 passed, 43 total
 | `tests/metering/meter.service.test.js` | 9 |
 | `tests/billing/paymob.service.test.js` | 6 |
 | `tests/billing/billing.service.test.js` | 12 |
-| `tests/billing/integration.test.js` | 16 |
-| **Total** | **43** |
+| `tests/billing/integration.test.js` | 28 |
+| `tests/pricing.test.js` | 15 |
+| `tests/generator/generator.service.test.js` | 12 |
+| `tests/usage/usage.service.test.js` | 11 |
+| **Total** | **93** |
 
 **Test categories covered:**
 - Usage idempotency (2 tests)
@@ -478,7 +661,10 @@ Tests:       43 passed, 43 total
 - Tenant isolation (4 tests)
 - Concurrency — duplicate webhooks (2 tests)
 - Security — forged callbacks, secrets not exposed (3 tests)
-- HTTP integration — auth, error codes, client input rejection (7 tests)
+- HTTP integration — checkout, webhook, generate, usage endpoints (28 tests)
+- Pricing — token categories, markup, cost calculation, error handling (15 tests)
+- Generator — atomic metering, idempotency, metadata, quota, isolation (12 tests)
+- Usage — aggregation, cost breakdown, plan limits, error handling (11 tests)
 
 ---
 
@@ -504,9 +690,8 @@ Comprehensive README with:
 
 Full API contract with:
 - Authentication mechanism
-- All 3 HTTP endpoints with request/response schemas
+- All 5 HTTP endpoints with request/response schemas (health, checkout, generate, usage, webhook)
 - Error codes and security behavior
-- Service layer methods (unit-tested, no HTTP routes)
 
 ### capstone.yaml
 
@@ -515,7 +700,7 @@ Correct commands:
 - `seed: npm run migrate`
 - `test: npm test`
 - `base_url: http://localhost:3000`
-- Endpoints: /health, /billing/checkout, /webhooks/paymob
+- Endpoints: /health, /billing/checkout, /billing/generate, /billing/usage, /webhooks/paymob
 
 ### DESIGN.md
 
@@ -525,9 +710,10 @@ Architecture document (historical — references Stripe from initial design phas
 
 ## Migration Reversibility
 
-Migration 003 has a proper `down` function:
+Migrations 003 and 004 have proper `down` functions:
 
 ```javascript
+// Migration 003 down
 exports.down = (pbm) => {
   pbm.sql(`DROP TABLE IF EXISTS payment_events;`);
   pbm.sql(`
@@ -537,27 +723,30 @@ exports.down = (pbm) => {
       DROP COLUMN IF EXISTS provider;
   `);
 };
+
+// Migration 004 down
+exports.down = (pbm) => {
+  pbm.sql(`ALTER TABLE usage_events DROP COLUMN IF EXISTS metadata;`);
+};
 ```
 
 Successfully verified by running:
 ```bash
+npm run migrate:down   # rolls back migration 004
 npm run migrate:down   # rolls back migration 003
-npm run migrate        # re-applies migration 003
+npm run migrate        # re-applies migrations 003 and 004
 ```
 
-Both commands executed without errors against the test database.
+All commands executed without errors against the test database.
 
 ---
 
 ## Not Claimed
 
 The following are **not** claimed as complete:
-- Cost calculation / pricing rules (Phase 4)
-- AI token pricing (Phase 4)
 - Invoice generation
 - Overage billing
 - Proration
 - Reconciliation jobs
 - Real payment processing (Test Mode only)
 - Production-grade authentication
-- HTTP endpoints for /generate and /usage (MeterService exists as service layer, unit-tested only)

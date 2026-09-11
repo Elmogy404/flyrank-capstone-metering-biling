@@ -5,6 +5,7 @@ const {
   setupTestTenant,
   cleanupTestTenant,
   cleanupAllPaymentEvents,
+  cleanupAllUsageEvents,
   closePool,
 } = require("../helpers");
 const subscriptionRepository = require("../../src/repositories/subscription.repository");
@@ -394,5 +395,236 @@ describe("Security", () => {
     const responseText = JSON.stringify(res.body);
     expect(responseText).not.toContain("egy_sk_test");
     expect(responseText).not.toContain("6CFF0B29");
+  });
+});
+
+describe("POST /billing/generate", () => {
+  test("authenticated tenant can generate", async () => {
+    const res = await request(app)
+      .post("/billing/generate")
+      .set("Authorization", `Bearer ${tenantId}`)
+      .send({ prompt: "Hello world", model: "gpt-4", idempotency_key: "integ-gen-1" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.recorded).toBe(true);
+    expect(res.body.usage).toBeDefined();
+    expect(res.body.usage.input).toBeGreaterThan(0);
+    expect(res.body.usage.output).toBeGreaterThan(0);
+    expect(res.body.total_tokens).toBeGreaterThan(0);
+  });
+
+  test("unauthenticated request is rejected", async () => {
+    const res = await request(app)
+      .post("/billing/generate")
+      .send({ prompt: "Hello", idempotency_key: "integ-gen-noauth" });
+
+    expect(res.status).toBe(401);
+  });
+
+  test("missing prompt is rejected", async () => {
+    const res = await request(app)
+      .post("/billing/generate")
+      .set("Authorization", `Bearer ${tenantId}`)
+      .send({ idempotency_key: "integ-gen-noprompt" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("prompt is required");
+  });
+
+  test("missing idempotency_key is rejected", async () => {
+    const res = await request(app)
+      .post("/billing/generate")
+      .set("Authorization", `Bearer ${tenantId}`)
+      .send({ prompt: "Hello" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("idempotency_key is required");
+  });
+
+  test("duplicate idempotency key returns existing result", async () => {
+    const res1 = await request(app)
+      .post("/billing/generate")
+      .set("Authorization", `Bearer ${tenantId}`)
+      .send({ prompt: "Test", idempotency_key: "integ-gen-dup" });
+
+    const res2 = await request(app)
+      .post("/billing/generate")
+      .set("Authorization", `Bearer ${tenantId}`)
+      .send({ prompt: "Test", idempotency_key: "integ-gen-dup" });
+
+    expect(res1.status).toBe(200);
+    expect(res2.status).toBe(200);
+    expect(res1.body.recorded).toBe(true);
+    expect(res2.body.recorded).toBe(false);
+  });
+
+  test("client cannot control tenant ID", async () => {
+    const otherTenant = await setupTestTenant();
+
+    const res = await request(app)
+      .post("/billing/generate")
+      .set("Authorization", `Bearer ${tenantId}`)
+      .send({ prompt: "Test", idempotency_key: "integ-gen-iso", tenant_id: otherTenant.tenantId });
+
+    expect(res.status).toBe(200);
+
+    await cleanupTestTenant(otherTenant.tenantId);
+  });
+});
+
+describe("GET /billing/usage", () => {
+  test("authenticated tenant can get usage", async () => {
+    const res = await request(app)
+      .get("/billing/usage")
+      .set("Authorization", `Bearer ${tenantId}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.period).toBeDefined();
+    expect(res.body.usage).toBeDefined();
+    expect(res.body.usage.api_calls).toBeDefined();
+    expect(res.body.usage.ai_tokens).toBeDefined();
+    expect(res.body.cost).toBeDefined();
+  });
+
+  test("unauthenticated request is rejected", async () => {
+    const res = await request(app)
+      .get("/billing/usage");
+
+    expect(res.status).toBe(401);
+  });
+
+  test("reflects usage from generate calls", async () => {
+    await request(app)
+      .post("/billing/generate")
+      .set("Authorization", `Bearer ${tenantId}`)
+      .send({ prompt: "Usage test", idempotency_key: "integ-usage-1" });
+
+    const res = await request(app)
+      .get("/billing/usage")
+      .set("Authorization", `Bearer ${tenantId}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.usage.api_calls.used).toBeGreaterThanOrEqual(1);
+    expect(res.body.usage.ai_tokens.used).toBeGreaterThan(0);
+  });
+
+  test("includes plan limits", async () => {
+    const res = await request(app)
+      .get("/billing/usage")
+      .set("Authorization", `Bearer ${tenantId}`);
+
+    expect(res.body.usage.api_calls.limit).toBeGreaterThan(0);
+    expect(res.body.usage.ai_tokens.limit).toBeGreaterThan(0);
+  });
+
+  test("calculates remaining quota", async () => {
+    const res = await request(app)
+      .get("/billing/usage")
+      .set("Authorization", `Bearer ${tenantId}`);
+
+    expect(res.body.usage.api_calls.remaining).toBe(
+      res.body.usage.api_calls.limit - res.body.usage.api_calls.used
+    );
+  });
+
+  test("includes cost breakdown with pricing info", async () => {
+    const res = await request(app)
+      .get("/billing/usage")
+      .set("Authorization", `Bearer ${tenantId}`);
+
+    expect(res.body.cost.micro_units).toBeGreaterThanOrEqual(0);
+    expect(res.body.cost.markup).toBeDefined();
+    expect(res.body.cost.markup.numerator).toBe(3);
+    expect(res.body.cost.markup.denominator).toBe(2);
+    expect(res.body.cost.token_pricing).toBeDefined();
+    expect(res.body.cost.token_pricing.input).toBeDefined();
+    expect(res.body.cost.token_pricing.output).toBeDefined();
+  });
+
+  test("respects custom month and year query params", async () => {
+    const res = await request(app)
+      .get("/billing/usage?month=6&year=2025")
+      .set("Authorization", `Bearer ${tenantId}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.period.month).toBe(6);
+    expect(res.body.period.year).toBe(2025);
+  });
+
+  test("rejects month=13 with 400", async () => {
+    const res = await request(app)
+      .get("/billing/usage?month=13")
+      .set("Authorization", `Bearer ${tenantId}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("month must be an integer between 1 and 12");
+  });
+
+  test("rejects month=0 with 400", async () => {
+    const res = await request(app)
+      .get("/billing/usage?month=0")
+      .set("Authorization", `Bearer ${tenantId}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("month must be an integer between 1 and 12");
+  });
+
+  test("rejects month=abc with 400", async () => {
+    const res = await request(app)
+      .get("/billing/usage?month=abc")
+      .set("Authorization", `Bearer ${tenantId}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("month must be an integer between 1 and 12");
+  });
+
+  test("rejects year=0 with 400", async () => {
+    const res = await request(app)
+      .get("/billing/usage?year=0")
+      .set("Authorization", `Bearer ${tenantId}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("year must be a positive integer");
+  });
+
+  test("rejects year=-1 with 400", async () => {
+    const res = await request(app)
+      .get("/billing/usage?year=-1")
+      .set("Authorization", `Bearer ${tenantId}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("year must be a positive integer");
+  });
+
+  test("rejects year=abc with 400", async () => {
+    const res = await request(app)
+      .get("/billing/usage?year=abc")
+      .set("Authorization", `Bearer ${tenantId}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("year must be a positive integer");
+  });
+
+  test("generate returns 429 with quota details when API_CALL quota exceeded", async () => {
+    await cleanupAllUsageEvents();
+
+    // Free plan: 1000 API calls. Fill to 1000 directly.
+    await pool.query(
+      `INSERT INTO usage_events (tenant_id, type, quantity, idempotency_key) VALUES ($1, 'API_CALL', 1000, 'integ-quad-pre-fill')`,
+      [tenantId]
+    );
+
+    const res = await request(app)
+      .post("/billing/generate")
+      .set("Authorization", `Bearer ${tenantId}`)
+      .send({ prompt: "Over limit", idempotency_key: "integ-quad-over" });
+
+    expect(res.status).toBe(429);
+    expect(res.body.error).toBe("Quota exceeded");
+    expect(res.body.type).toBe("API_CALL");
+    expect(res.body.used).toBe(1001);
+    expect(res.body.limit).toBe(1000);
+
+    await cleanupAllUsageEvents();
   });
 });

@@ -14,31 +14,21 @@ class QuotaExceededError extends Error {
 
 class MeterService {
   async recordUsage({ tenantId, type, quantity, idempotencyKey }) {
+    // Check idempotency before entering the transaction.
+    const existing = await usageRepository.findByTenantAndIdempotencyKey(
+      tenantId,
+      idempotencyKey
+    );
+
+    if (existing) {
+      return { recorded: false, event: existing };
+    }
+
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
 
-      let event;
-      try {
-        const result = await client.query(
-          `INSERT INTO usage_events (tenant_id, type, quantity, idempotency_key)
-           VALUES ($1, $2, $3, $4)
-           RETURNING *`,
-          [tenantId, type, quantity, idempotencyKey]
-        );
-        event = result.rows[0];
-      } catch (err) {
-        if (err.code === "23505") {
-          await client.query("ROLLBACK");
-          const existing = await usageRepository.findByTenantAndIdempotencyKey(
-            tenantId,
-            idempotencyKey
-          );
-          return { recorded: false, event: existing };
-        }
-        throw err;
-      }
-
+      // Lock subscription row to prevent concurrent quota races.
       const subscription =
         await subscriptionRepository.findActiveWithPlanForUpdate(
           tenantId,
@@ -59,6 +49,7 @@ class MeterService {
       period.setDate(1);
       period.setHours(0, 0, 0, 0);
 
+      // Read current usage BEFORE inserting.
       const currentUsage = await usageRepository.getMonthlyUsageByType(
         tenantId,
         type,
@@ -66,9 +57,33 @@ class MeterService {
         client
       );
 
-      if (currentUsage > limit) {
+      // Explicitly validate: current_usage + requested_usage <= plan_limit.
+      if (currentUsage + quantity > limit) {
         await client.query("ROLLBACK");
-        throw new QuotaExceededError(type, currentUsage, limit);
+        throw new QuotaExceededError(type, currentUsage + quantity, limit);
+      }
+
+      // Quota check passed. Insert usage event.
+      let event;
+      try {
+        const result = await client.query(
+          `INSERT INTO usage_events (tenant_id, type, quantity, idempotency_key)
+           VALUES ($1, $2, $3, $4)
+           RETURNING *`,
+          [tenantId, type, quantity, idempotencyKey]
+        );
+        event = result.rows[0];
+      } catch (err) {
+        if (err.code === "23505") {
+          await client.query("ROLLBACK");
+          const duplicateExisting =
+            await usageRepository.findByTenantAndIdempotencyKey(
+              tenantId,
+              idempotencyKey
+            );
+          return { recorded: false, event: duplicateExisting };
+        }
+        throw err;
       }
 
       await client.query("COMMIT");

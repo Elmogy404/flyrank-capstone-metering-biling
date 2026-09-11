@@ -11,6 +11,14 @@ endpoints:
     method: POST
     auth: Bearer <tenant_id>
     description: Initiate Paymob checkout for Pro plan
+  - path: /billing/generate
+    method: POST
+    auth: Bearer <tenant_id>
+    description: Atomic billable generation with AI token metering
+  - path: /billing/usage
+    method: GET
+    auth: Bearer <tenant_id>
+    description: Monthly usage summary with cost breakdown
   - path: /webhooks/paymob
     method: POST
     auth: none

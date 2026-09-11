@@ -21,7 +21,7 @@ This system provides:
 
 ## Features
 
-### Implemented (Phases 1-3)
+### Implemented (Phases 1-4)
 
 - Multi-tenant data model (tenants, plans, subscriptions)
 - Three plan tiers: Free, Pro, Premium
@@ -35,18 +35,12 @@ This system provides:
 - Payment event deduplication (`UNIQUE(provider, provider_event_id)`)
 - Subscription synchronization from provider webhook events
 - Server-side plan pricing (client cannot control amount or tenant ID)
-- PostgreSQL migrations (001 schema, 002 seed, 003 payment_events)
-- 43 automated tests across 4 test suites
-
-### Not Implemented (Phase 4 / Stretch)
-
-- Cost calculation / rollup
-- AI token pricing rules
-- Invoice generation
-- Overage billing
-- Proration
-- Reconciliation jobs
-- Alerts
+- PostgreSQL migrations (001 schema, 002 seed, 003 payment_events, 004 usage metadata)
+- POST /generate endpoint with atomic API_CALL + AI_TOKEN metering
+- GET /usage endpoint with monthly usage + cost breakdown
+- AI token pricing by category (input, cached_input, output, reasoning)
+- Server-side cost calculation with configurable markup
+- 93 automated tests across 7 test suites
 
 ## Architecture
 
@@ -67,6 +61,32 @@ Client
   │       │   Paymob API (POST /v1/intention/)
   │       │
   │       └─► Returns checkout URL to client
+  │
+  ├─► POST /billing/generate (authenticated)
+  │       │
+  │       v
+  │   GeneratorController
+  │       │
+  │       v
+  │   GeneratorService.generate()
+  │       │
+  │       ├─► Simulates AI token generation
+  │       ├─► Atomic record: API_CALL + AI_TOKEN (single transaction)
+  │       ├─► Quota enforcement (SELECT ... FOR UPDATE)
+  │       └─► Returns token breakdown + cost info
+  │
+  ├─► GET /billing/usage (authenticated)
+  │       │
+  │       v
+  │   UsageController
+  │       │
+  │       v
+  │   UsageService.getMonthlyUsage()
+  │       │
+  │       ├─► Reads usage_events for current month
+  │       ├─► Joins subscription/plan for limits
+  │       ├─► Calculates cost from token pricing
+  │       └─► Returns usage, limits, remaining, cost
   │
   ├─► POST /webhooks/paymob (public)
   │       │
@@ -176,6 +196,101 @@ Content-Type: application/json
 - `409` — `Already subscribed to Pro`
 - `500` — `Internal server error`
 
+### `POST /billing/generate`
+
+Atomic billable operation: records API_CALL + AI_TOKEN usage with simulated token generation. Requires authentication.
+
+**Headers:**
+```
+Authorization: Bearer <tenant_id>
+Content-Type: application/json
+```
+
+**Request:**
+```json
+{
+  "prompt": "Explain quantum computing",
+  "model": "gpt-4",
+  "idempotency_key": "unique-key-per-request"
+}
+```
+
+**Response (200):**
+```json
+{
+  "recorded": true,
+  "usage": {
+    "input": 25,
+    "cached_input": 7,
+    "output": 37,
+    "reasoning": 15
+  },
+  "total_tokens": 84
+}
+```
+
+**Errors:**
+- `400` — `prompt is required` / `idempotency_key is required`
+- `401` — `Access token required` / `Invalid token`
+- `404` — `No active subscription`
+- `429` — `Quota exceeded` (with type, used, limit details)
+- `500` — `Internal server error`
+
+### `GET /billing/usage`
+
+Monthly usage summary with cost breakdown. Requires authentication.
+
+**Headers:**
+```
+Authorization: Bearer <tenant_id>
+```
+
+**Query Parameters:**
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `month` | No | Month number (1-12), defaults to current |
+| `year` | No | Year (e.g. 2026), defaults to current |
+
+**Response (200):**
+```json
+{
+  "period": { "month": 9, "year": 2026 },
+  "usage": {
+    "api_calls": {
+      "used": 42,
+      "limit": 10000,
+      "remaining": 9958
+    },
+    "ai_tokens": {
+      "used": 15000,
+      "limit": 1000000,
+      "remaining": 985000,
+      "breakdown": {
+        "input": 5000,
+        "cached_input": 1500,
+        "output": 6000,
+        "reasoning": 2500
+      }
+    }
+  },
+  "cost": {
+    "micro_units": 2650000,
+    "markup": 1.5,
+    "token_pricing": {
+      "input": { "cost": 100, "price": 150 },
+      "cached_input": { "cost": 10, "price": 15 },
+      "output": { "cost": 300, "price": 450 },
+      "reasoning": { "cost": 300, "price": 450 }
+    }
+  }
+}
+```
+
+**Errors:**
+- `401` — `Access token required` / `Invalid token`
+- `404` — `No active subscription`
+- `500` — `Internal server error`
+
 ### `POST /webhooks/paymob`
 
 Paymob webhook callback. **Public endpoint** — no authentication (Paymob must reach it directly).
@@ -262,10 +377,11 @@ cp .env.example .env
 npm run migrate
 ```
 
-This runs all three migrations:
+This runs all four migrations:
 - `001_initial_schema.sql` — Creates tables (plans, tenants, subscriptions, usage_events)
 - `002_seed.sql` — Seeds plan data and demo tenant
 - `003_add_payment_events_and_provider.js` — Adds `payment_events` table and `provider` column
+- `004_add_usage_metadata.js` — Adds `metadata` JSONB column to `usage_events`
 
 ### 4. Start the server
 
@@ -281,18 +397,21 @@ Server runs on `http://localhost:3000` by default.
 npm test
 ```
 
-Expected result: **43 tests passed across 4 test suites.**
+Expected result: **93 tests passed across 7 test suites.**
 
 ## Testing
 
-Tests are organized into 4 suites:
+Tests are organized into 7 suites:
 
 | Suite | File | Tests | Coverage |
 |-------|------|-------|----------|
 | Metering | `tests/metering/meter.service.test.js` | 9 | Usage recording, idempotency, quota enforcement, concurrency, tenant isolation |
 | Paymob | `tests/billing/paymob.service.test.js` | 6 | HMAC verification, checkout URL generation |
 | Billing | `tests/billing/billing.service.test.js` | 12 | Checkout creation, webhook processing, deduplication, subscription sync, tenant isolation, concurrency, security |
-| Integration | `tests/billing/integration.test.js` | 16 | HTTP endpoint tests for checkout and webhook, auth, error handling, tenant isolation, concurrency, security |
+| Integration | `tests/billing/integration.test.js` | 28 | HTTP endpoint tests for all endpoints: checkout, webhook, generate, usage |
+| Pricing | `tests/pricing.test.js` | 15 | Token pricing constants, cost calculation, markup, error handling |
+| Generator | `tests/generator/generator.service.test.js` | 12 | Atomic metering, idempotency, metadata, quota enforcement, tenant isolation |
+| Usage | `tests/usage/usage.service.test.js` | 11 | Monthly usage aggregation, cost breakdown, plan limits, error handling |
 
 ### Test Categories
 
@@ -305,6 +424,9 @@ Tests are organized into 4 suites:
 - **Subscription sync** — Successful payment activates subscription; failed payment marks expired
 - **Tenant isolation** — Usage, subscriptions, and webhooks are scoped to individual tenants
 - **Security** — Invalid webhooks cannot upgrade tenants; secrets not exposed in responses
+- **Generate** — Atomic API_CALL + AI_TOKEN metering; token simulation; metadata storage; quota enforcement
+- **Usage** — Monthly aggregation; cost calculation; plan limits; category breakdown
+- **Pricing** — Token category pricing; markup application; integer arithmetic; error handling
 
 ## Limitations
 
@@ -312,22 +434,18 @@ Tests are organized into 4 suites:
 
 - **Paymob Test Mode only** — No real payment processing; uses Paymob's test environment
 - **Simplified authentication** — Token is a plain tenant ID, not a secure JWT or session token
-- **No `/generate` or `/usage` HTTP endpoints** — MeterService and QuotaService exist as service classes with unit tests, but are not wired into HTTP routes
 - **No real AI model calls** — AI token quantities are simulated values, not actual model usage
-- **No Phase 4 cost calculation** — No pricing rules, cost rollups, or billing calculations
 - **No invoicing** — No invoice generation or PDF creation
 - **No proration** — Plan changes are not prorated
 - **No overage billing** — Quota exceeded returns an error; no overage charges
 - **No reconciliation jobs** — No automated reconciliation of provider state
 - **One-time payment flow** — Paymob does not have a native subscription API; checkout is a one-time payment for plan activation
 
-### What Phase 4 Would Add
+### Stretch Goals (Not Implemented)
 
-- Cost calculation and pricing rules
-- AI token pricing by category (input, output, cached, reasoning)
 - Invoice generation
 - Overage billing
-- Monthly cost rollups
+- Proration
 - Reconciliation jobs
 - Alerts
 

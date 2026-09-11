@@ -1,13 +1,13 @@
 const { pool } = require("../db");
 
 class UsageRepository {
-  async create({ tenantId, type, quantity, idempotencyKey, client }) {
+  async create({ tenantId, type, quantity, idempotencyKey, metadata, client }) {
     const executor = client || pool;
     const result = await executor.query(
-      `INSERT INTO usage_events (tenant_id, type, quantity, idempotency_key)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO usage_events (tenant_id, type, quantity, idempotency_key, metadata)
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING *`,
-      [tenantId, type, quantity, idempotencyKey]
+      [tenantId, type, quantity, idempotencyKey, metadata || null]
     );
     return result.rows[0];
   }
@@ -44,6 +44,25 @@ class UsageRepository {
       [tenantId, usageType, period]
     );
     return parseInt(result.rows[0].total, 10);
+  }
+
+  async getMonthlyUsageByTypeDetailed(tenantId, usageType, period) {
+    const result = await pool.query(
+      `SELECT
+         COALESCE(SUM(quantity), 0) as total_quantity,
+         COALESCE(
+           jsonb_agg(
+             COALESCE(metadata->'breakdown', '{}'::jsonb)
+           ),
+           '[]'::jsonb
+         ) as breakdowns
+       FROM usage_events
+       WHERE tenant_id = $1
+         AND type = $2
+         AND DATE_TRUNC('month', created_at) = $3`,
+      [tenantId, usageType, period]
+    );
+    return result.rows[0];
   }
 }
 
