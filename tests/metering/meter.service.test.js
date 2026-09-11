@@ -128,7 +128,26 @@ describe("MeterService quota enforcement", () => {
     expect(result.recorded).toBe(true);
   });
 
-  test("allows usage exactly at quota", async () => {
+  test("succeeds when usage + quantity equals exactly the limit", async () => {
+    // Free plan: 1000 API calls. Record 1000 in one shot.
+    const result = await meterService.recordUsage({
+      tenantId,
+      type: "API_CALL",
+      quantity: 1000,
+      idempotencyKey: "key-quota-exact-1000",
+    });
+
+    expect(result.recorded).toBe(true);
+
+    const period = new Date();
+    period.setDate(1);
+    period.setHours(0, 0, 0, 0);
+
+    const usage = await meterService.getMonthlyUsage(tenantId, period);
+    expect(usage.API_CALL.used).toBe(1000);
+  });
+
+  test("allows usage exactly at quota via two requests", async () => {
     await meterService.recordUsage({
       tenantId,
       type: "API_CALL",
@@ -146,7 +165,19 @@ describe("MeterService quota enforcement", () => {
     expect(result.recorded).toBe(true);
   });
 
-  test("rejects usage exceeding quota", async () => {
+  test("rejects one unit over the boundary", async () => {
+    // Free plan: 1000 API calls. Record 1001 in one shot.
+    await expect(
+      meterService.recordUsage({
+        tenantId,
+        type: "API_CALL",
+        quantity: 1001,
+        idempotencyKey: "key-quota-over-1",
+      })
+    ).rejects.toThrow("Quota exceeded");
+  });
+
+  test("rejects when cumulative usage exceeds limit", async () => {
     await meterService.recordUsage({
       tenantId,
       type: "API_CALL",
@@ -162,6 +193,56 @@ describe("MeterService quota enforcement", () => {
         idempotencyKey: "key-quota-exceed-2",
       })
     ).rejects.toThrow("Quota exceeded");
+  });
+
+  test("rejected operation leaves no persisted usage", async () => {
+    // Fill to 999, then try to add 2 (exceeds limit).
+    await meterService.recordUsage({
+      tenantId,
+      type: "API_CALL",
+      quantity: 999,
+      idempotencyKey: "key-quota-noop-fill",
+    });
+
+    await expect(
+      meterService.recordUsage({
+        tenantId,
+        type: "API_CALL",
+        quantity: 2,
+        idempotencyKey: "key-quota-noop-reject",
+      })
+    ).rejects.toThrow("Quota exceeded");
+
+    const period = new Date();
+    period.setDate(1);
+    period.setHours(0, 0, 0, 0);
+
+    const usage = await meterService.getMonthlyUsage(tenantId, period);
+    expect(usage.API_CALL.used).toBe(999);
+  });
+
+  test("rejected operation does not persist event row", async () => {
+    await meterService.recordUsage({
+      tenantId,
+      type: "API_CALL",
+      quantity: 999,
+      idempotencyKey: "key-quota-norow-fill",
+    });
+
+    await expect(
+      meterService.recordUsage({
+        tenantId,
+        type: "API_CALL",
+        quantity: 2,
+        idempotencyKey: "key-quota-norow-reject",
+      })
+    ).rejects.toThrow("Quota exceeded");
+
+    const result = await pool.query(
+      `SELECT * FROM usage_events WHERE tenant_id = $1 AND idempotency_key = $2`,
+      [tenantId, "key-quota-norow-reject"]
+    );
+    expect(result.rows.length).toBe(0);
   });
 });
 
@@ -187,15 +268,48 @@ describe("MeterService concurrency", () => {
     for (const r of rejected) {
       expect(r.event.id).toBe(recorded[0].event.id);
     }
+
+    const period = new Date();
+    period.setDate(1);
+    period.setHours(0, 0, 0, 0);
+
+    const usage = await meterService.getMonthlyUsage(tenantId, period);
+    expect(usage.API_CALL.used).toBe(1);
   });
 
-  test("concurrent requests competing for quota respect the limit", async () => {
-    const promises = Array.from({ length: 10 }, (_, i) =>
+  test("concurrent competing requests respect the limit", async () => {
+    // Free plan: 1000 API calls. 10 requests x 100 each = 1000 total.
+    // Exactly fits — all should succeed.
+    const promisesFit = Array.from({ length: 10 }, (_, i) =>
       meterService.recordUsage({
         tenantId,
         type: "API_CALL",
         quantity: 100,
-        idempotencyKey: `key-concurrent-quota-${i}`,
+        idempotencyKey: `key-concurrent-fit-${i}`,
+      })
+    );
+
+    const resultsFit = await Promise.allSettled(promisesFit);
+    const succeededFit = resultsFit.filter((r) => r.status === "fulfilled");
+
+    const period = new Date();
+    period.setDate(1);
+    period.setHours(0, 0, 0, 0);
+
+    const usageFit = await meterService.getMonthlyUsage(tenantId, period);
+    expect(usageFit.API_CALL.used).toBe(1000);
+    expect(succeededFit.length).toBe(10);
+  });
+
+  test("concurrent requests exceeding limit reject without exceeding it", async () => {
+    // 20 requests x 100 each = 2000 total. Limit is 1000.
+    // Exactly 10 should succeed, 10 should fail.
+    const promises = Array.from({ length: 20 }, (_, i) =>
+      meterService.recordUsage({
+        tenantId,
+        type: "API_CALL",
+        quantity: 100,
+        idempotencyKey: `key-concurrent-over-${i}`,
       })
     );
 
@@ -213,6 +327,9 @@ describe("MeterService concurrency", () => {
     const usage = await meterService.getMonthlyUsage(tenantId, period);
 
     expect(usage.API_CALL.used).toBeLessThanOrEqual(1000);
-    expect(succeeded.length + failed.length).toBe(10);
+    expect(usage.API_CALL.used).toBe(1000);
+    expect(succeeded.length).toBe(10);
+    expect(failed.length).toBe(10);
+    expect(succeeded.length + failed.length).toBe(20);
   });
 });

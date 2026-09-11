@@ -1,8 +1,9 @@
 const { pool } = require("../db");
 
 class SubscriptionRepository {
-  async findByTenantId(tenantId) {
-    const result = await pool.query(
+  async findByTenantId(tenantId, client) {
+    const executor = client || pool;
+    const result = await executor.query(
       `SELECT * FROM subscriptions
        WHERE tenant_id = $1
        ORDER BY created_at DESC
@@ -20,7 +21,8 @@ class SubscriptionRepository {
          s.tenant_id,
          s.plan_id,
          s.status,
-         s.stripe_subscription_id,
+         s.provider,
+         s.provider_subscription_id,
          p.name as plan_name,
          p.api_calls_limit,
          p.ai_tokens_limit
@@ -42,7 +44,8 @@ class SubscriptionRepository {
          s.tenant_id,
          s.plan_id,
          s.status,
-         s.stripe_subscription_id,
+         s.provider,
+         s.provider_subscription_id,
          p.name as plan_name,
          p.api_calls_limit,
          p.ai_tokens_limit
@@ -57,35 +60,37 @@ class SubscriptionRepository {
     return result.rows[0] || null;
   }
 
-  async findByStripeSubscriptionId(stripeSubscriptionId) {
-    const result = await pool.query(
+  async findByProviderSubscriptionId(providerSubscriptionId, client) {
+    const executor = client || pool;
+    const result = await executor.query(
       `SELECT * FROM subscriptions
-       WHERE stripe_subscription_id = $1`,
-      [stripeSubscriptionId]
+       WHERE provider_subscription_id = $1`,
+      [providerSubscriptionId]
     );
     return result.rows[0] || null;
   }
 
-  async create({ tenantId, planId, status, stripeSubscriptionId }) {
+  async create({ tenantId, planId, status, provider, providerSubscriptionId }) {
     const result = await pool.query(
-      `INSERT INTO subscriptions (tenant_id, plan_id, status, stripe_subscription_id)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO subscriptions (tenant_id, plan_id, status, provider, provider_subscription_id)
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING *`,
-      [tenantId, planId, status, stripeSubscriptionId]
+      [tenantId, planId, status, provider || "paymob", providerSubscriptionId || null]
     );
     return result.rows[0];
   }
 
-  async update(id, fields) {
+  async update(id, fields, client) {
     const keys = Object.keys(fields);
     if (keys.length === 0) return null;
 
+    const executor = client || pool;
     const setClauses = keys
       .map((key, i) => `${key} = $${i + 2}`)
       .join(", ");
     const values = [id, ...Object.values(fields)];
 
-    const result = await pool.query(
+    const result = await executor.query(
       `UPDATE subscriptions
        SET ${setClauses}, updated_at = CURRENT_TIMESTAMP
        WHERE id = $1

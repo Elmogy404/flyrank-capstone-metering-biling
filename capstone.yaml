@@ -1,0 +1,25 @@
+run: node src/server.js
+seed: npm run migrate
+test: npm test
+base_url: http://localhost:3000
+endpoints:
+  - path: /health
+    method: GET
+    auth: none
+    description: Health check
+  - path: /billing/checkout
+    method: POST
+    auth: Bearer <tenant_id>
+    description: Initiate Paymob checkout for Pro plan
+  - path: /billing/generate
+    method: POST
+    auth: Bearer <tenant_id>
+    description: Atomic billable generation with AI token metering
+  - path: /billing/usage
+    method: GET
+    auth: Bearer <tenant_id>
+    description: Monthly usage summary with cost breakdown
+  - path: /webhooks/paymob
+    method: POST
+    auth: none
+    description: Paymob webhook callback (HMAC verified)
