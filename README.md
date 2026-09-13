@@ -14,6 +14,7 @@ The core engineering challenge is correctness under concurrent requests, retries
 - Atomic billable generation: API_CALL + AI_TOKEN in one transaction
 - Monthly usage aggregation with cost breakdown
 - AI token pricing by category (input, cached_input, output, reasoning)
+- API call pricing (50 microcents per call, with markup)
 - Integer microcent arithmetic (no floating point)
 - Paymob checkout with server-side pricing
 - HMAC-SHA512 webhook verification (timing-safe)
@@ -74,7 +75,7 @@ See [API.md](API.md) for full request/response schemas.
 
 **Quotas:** Before inserting, the service checks `currentUsage + quantity > plan_limit` within a `SELECT ... FOR UPDATE` transaction. Exceeding returns HTTP 429.
 
-**Cost:** Token costs use integer microcent pricing with configurable markup (NUMERATOR=3, DENOMINATOR=2). No floating point.
+**Cost:** API call and token costs use integer microcent pricing with configurable markup (NUMERATOR=3, DENOMINATOR=2). No floating point.
 
 **Payments:** Checkout creates a Paymob intention server-side. The client receives a checkout URL. On payment, Paymob sends an HMAC-SHA512 verified webhook. The service deduplicates the event, then synchronizes subscription state.
 
@@ -86,7 +87,7 @@ See [API.md](API.md) for full request/response schemas.
 npm install
 cp .env.example .env    # configure DATABASE_URL, PAYMOB keys
 npm run migrate          # 4 migrations (schema + seed + payment_events + metadata)
-npm test                 # 122 tests, 9 suites
+npm test                 # 130 tests, 9 suites
 npm run reconcile        # background job
 node src/server.js       # http://localhost:3000
 ```

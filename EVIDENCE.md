@@ -62,6 +62,14 @@ Concrete proof per Definition of Done requirement.
 **Proof:** `pricing.test.js` — "all costs are integers"
 **Result:** No floating point. All values are integer microcents.
 
+### API call pricing
+**Proof:** `pricing.test.js` — "is defined and has correct structure", "single API call cost is 50 microcents"
+**Result:** API_CALL_PRICING defined at 50 microcents per call, with integer arithmetic.
+
+### API calls included in monthly cost
+**Proof:** `usage.service.test.js` — "API calls contribute to total monthly cost", "includes api_call_pricing in cost response"
+**Result:** API call cost (50 × quantity × markup) added to total monthly cost alongside token costs.
+
 ---
 
 ## Generate Endpoint
@@ -184,7 +192,7 @@ CONSTRAINT unique_provider_event UNIQUE (provider, provider_event_id)
 
 ```
 Test Suites: 9 passed, 9 total
-Tests:       122 passed, 122 total
+Tests:       130 passed, 130 total
 ```
 
 | Suite | Tests |
@@ -193,9 +201,9 @@ Tests:       122 passed, 122 total
 | `tests/billing/paymob.service.test.js` | 6 |
 | `tests/billing/billing.service.test.js` | 12 |
 | `tests/billing/integration.test.js` | 35 |
-| `tests/pricing.test.js` | 15 |
+| `tests/pricing.test.js` | 20 |
 | `tests/generator/generator.service.test.js` | 16 |
-| `tests/usage/usage.service.test.js` | 14 |
+| `tests/usage/usage.service.test.js` | 17 |
 | `tests/jobs/reconciliation.job.test.js` | 8 |
 | `tests/jobs/run-reconciliation.test.js` | 2 |
 

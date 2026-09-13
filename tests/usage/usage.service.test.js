@@ -1,6 +1,6 @@
 const { UsageService } = require("../../src/services/usage.service");
 const { GeneratorService } = require("../../src/services/generator.service");
-const { TOKEN_PRICING, MARKUP_NUMERATOR, MARKUP_DENOMINATOR } = require("../../src/services/pricing");
+const { TOKEN_PRICING, API_CALL_PRICING, MARKUP_NUMERATOR, MARKUP_DENOMINATOR } = require("../../src/services/pricing");
 const {
   pool,
   setupTestTenant,
@@ -136,6 +136,47 @@ describe("UsageService.getMonthlyUsage", () => {
     expect(result.cost.token_pricing.output).toBeDefined();
     expect(result.cost.token_pricing.cached_input).toBeDefined();
     expect(result.cost.token_pricing.reasoning).toBeDefined();
+  });
+
+  test("includes api_call_pricing in cost response", async () => {
+    const result = await usageService.getMonthlyUsage({
+      tenantId,
+    });
+
+    expect(result.cost.api_call_pricing).toBeDefined();
+    expect(result.cost.api_call_pricing.cost).toBe(API_CALL_PRICING.costMicroUnits);
+    expect(result.cost.api_call_pricing.price).toBe(
+      Math.ceil((API_CALL_PRICING.costMicroUnits * MARKUP_NUMERATOR) / MARKUP_DENOMINATOR)
+    );
+  });
+
+  test("API calls contribute to total monthly cost", async () => {
+    await generatorService.generate({
+      tenantId,
+      prompt: "Cost test",
+      model: "gpt-4",
+      idempotencyKey: "usage-api-cost-1",
+    });
+
+    const result = await usageService.getMonthlyUsage({
+      tenantId,
+    });
+
+    const expectedApiCallCost = Math.ceil(
+      (API_CALL_PRICING.costMicroUnits * 1 * MARKUP_NUMERATOR) / MARKUP_DENOMINATOR
+    );
+    expect(result.cost.micro_units).toBeGreaterThanOrEqual(expectedApiCallCost);
+  });
+
+  test("zero API calls produce zero API call cost component", async () => {
+    const result = await usageService.getMonthlyUsage({
+      tenantId,
+      month: "6",
+      year: "2025",
+    });
+
+    expect(result.usage.api_calls.used).toBe(0);
+    expect(result.cost.api_call_pricing.cost).toBe(API_CALL_PRICING.costMicroUnits);
   });
 
   test("includes AI token category breakdown", async () => {

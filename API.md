@@ -139,6 +139,10 @@ Monthly usage summary with cost breakdown.
   "cost": {
     "micro_units": 2650000,
     "markup": { "numerator": 3, "denominator": 2 },
+    "api_call_pricing": {
+      "cost": 50,
+      "price": 75
+    },
     "token_pricing": {
       "input": { "cost": 100, "price": 150 },
       "cached_input": { "cost": 10, "price": 15 },

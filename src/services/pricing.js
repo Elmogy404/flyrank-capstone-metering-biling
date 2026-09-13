@@ -1,7 +1,7 @@
 "use strict";
 
 /**
- * AI token pricing constants.
+ * Pricing constants.
  * All values are in integer microcents (1/100,000 of a cent) to avoid floating point.
  *
  * Markup is applied server-side via calculatePrice() — never raw provider cost.
@@ -14,6 +14,8 @@ const TOKEN_PRICING = {
   output: { name: "output", costMicroUnits: 300 },
   reasoning: { name: "reasoning", costMicroUnits: 300 },
 };
+
+const API_CALL_PRICING = { name: "api_call", costMicroUnits: 50 };
 
 const MARKUP_NUMERATOR = 3;
 const MARKUP_DENOMINATOR = 2;
@@ -51,6 +53,7 @@ function calculateTotalPrice(breakdown) {
 
 module.exports = {
   TOKEN_PRICING,
+  API_CALL_PRICING,
   MARKUP_NUMERATOR,
   MARKUP_DENOMINATOR,
   calculateCost,

@@ -1,5 +1,6 @@
 const {
   TOKEN_PRICING,
+  API_CALL_PRICING,
   MARKUP_NUMERATOR,
   MARKUP_DENOMINATOR,
   calculateCost,
@@ -39,6 +40,34 @@ describe("Pricing", () => {
       for (const category of Object.values(TOKEN_PRICING)) {
         expect(Number.isInteger(category.costMicroUnits)).toBe(true);
       }
+    });
+  });
+
+  describe("API_CALL_PRICING", () => {
+    test("is defined and has correct structure", () => {
+      expect(API_CALL_PRICING).toBeDefined();
+      expect(API_CALL_PRICING.name).toBe("api_call");
+      expect(API_CALL_PRICING.costMicroUnits).toBe(50);
+    });
+
+    test("cost is an integer", () => {
+      expect(Number.isInteger(API_CALL_PRICING.costMicroUnits)).toBe(true);
+    });
+
+    test("single API call cost is 50 microcents", () => {
+      const cost = API_CALL_PRICING.costMicroUnits * 1;
+      expect(cost).toBe(50);
+    });
+
+    test("10 API calls cost 500 microcents", () => {
+      const cost = API_CALL_PRICING.costMicroUnits * 10;
+      expect(cost).toBe(500);
+    });
+
+    test("API call price with markup is correct", () => {
+      const cost = API_CALL_PRICING.costMicroUnits * 5;
+      const price = Math.ceil((cost * MARKUP_NUMERATOR) / MARKUP_DENOMINATOR);
+      expect(price).toBe(Math.ceil((250 * 3) / 2));
     });
   });
 

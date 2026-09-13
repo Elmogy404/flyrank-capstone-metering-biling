@@ -1,6 +1,6 @@
 const usageRepository = require("../repositories/usage.repository");
 const subscriptionRepository = require("../repositories/subscription.repository");
-const { calculateTotalPrice, TOKEN_PRICING, MARKUP_NUMERATOR, MARKUP_DENOMINATOR } = require("./pricing");
+const { calculateTotalPrice, TOKEN_PRICING, API_CALL_PRICING, MARKUP_NUMERATOR, MARKUP_DENOMINATOR } = require("./pricing");
 
 class UsageService {
   async getMonthlyUsage({ tenantId, month, year }) {
@@ -44,7 +44,10 @@ class UsageService {
       }
     }
 
-    const costMicroUnits = calculateTotalPrice(breakdown);
+    const apiCallCost = API_CALL_PRICING.costMicroUnits * apiCallsUsage;
+    const apiCallPrice = Math.ceil((apiCallCost * MARKUP_NUMERATOR) / MARKUP_DENOMINATOR);
+    const tokenPrice = calculateTotalPrice(breakdown);
+    const costMicroUnits = apiCallPrice + tokenPrice;
 
     const apiCallsLimit = subscription.api_calls_limit;
     const aiTokensLimit = subscription.ai_tokens_limit;
@@ -73,6 +76,10 @@ class UsageService {
       cost: {
         micro_units: costMicroUnits,
         markup: { numerator: MARKUP_NUMERATOR, denominator: MARKUP_DENOMINATOR },
+        api_call_pricing: {
+          cost: API_CALL_PRICING.costMicroUnits,
+          price: Math.ceil((API_CALL_PRICING.costMicroUnits * MARKUP_NUMERATOR) / MARKUP_DENOMINATOR),
+        },
         token_pricing: Object.fromEntries(
           Object.entries(TOKEN_PRICING).map(([k, v]) => [
             k,
